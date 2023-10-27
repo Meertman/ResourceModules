@@ -99,6 +99,12 @@ param zoneRedundant bool = true
 @description('Optional. If the zoneRedundant parameter is true, replicas will be provisioned in the availability zones specified here. Otherwise, the service will choose where replicas are deployed.')
 param zones array = []
 
+@description('Optional. When true, redis cache will be geo-replicated to the secondary regions specified in the secondaryRegions parameter.')
+param geoReplication bool = false
+
+@description('Optional. If the geoReplication parameter is true, secondary caches will be setup and linked to the cache in the primary region.')
+param secondaryRedisCaches secondaryRedisCacheType
+
 @description('Optional. Configuration details for private endpoints. For security reasons, it is recommended to use private endpoints whenever possible.')
 param privateEndpoints privateEndpointType
 
@@ -214,6 +220,46 @@ resource redis 'Microsoft.Cache/redis@2022-06-01' = {
   zones: availabilityZones
 }
 
+resource secondary_redis 'Microsoft.Cache/redis@2022-06-01' = [for secondaryRedisCache in secondaryRedisCaches: if (skuName == 'Premium' && geoReplication) {
+  name: secondaryRedisCache.name
+  location: secondaryRedisCache.location
+  tags: tags
+  identity: {
+    type: secondaryRedisCache.systemAssignedIdentity ? 'SystemAssigned' : !empty(secondaryRedisCache.userAssignedIdentities) ? 'UserAssigned' : 'None'
+    userAssignedIdentities: !empty(userAssignedIdentities) ? userAssignedIdentities : null
+  }
+  properties: {
+    enableNonSslPort: enableNonSslPort
+    minimumTlsVersion: minimumTlsVersion
+    publicNetworkAccess: !empty(publicNetworkAccess) ? any(publicNetworkAccess) : (!empty(privateEndpoints) ? 'Disabled' : null)
+    redisConfiguration: !empty(redisConfiguration) ? redisConfiguration : null
+    redisVersion: redisVersion
+    replicasPerMaster: replicasPerMaster
+    replicasPerPrimary: replicasPerPrimary
+    shardCount: shardCount
+    sku: {
+      capacity: capacity
+      family: 'P'
+      name: 'Premium'
+    }
+    staticIP: !empty(secondaryRedisCache.staticIP) ? secondaryRedisCache.staticIP : null
+    subnetId: !empty(secondaryRedisCache.subnetId) ? secondaryRedisCache.subnetId : null
+    tenantSettings: tenantSettings
+  }
+  zones: secondaryRedisCache.zoneRedundant ? !empty(secondaryRedisCache.zones) ? secondaryRedisCache.zones : pickZones('Microsoft.Cache', 'redis', secondaryRedisCache.location, 3) : []
+}]
+
+resource secondary_redis_link 'Microsoft.Cache/redis/linkedServers@2022-06-01' = [for (secondaryRedisCache, index) in secondaryRedisCaches: {
+  name: secondaryRedisCache.name
+  parent: redis
+  properties: {
+    linkedRedisCacheId: secondary_redis[index].id
+    linkedRedisCacheLocation: secondaryRedisCache.location
+    serverRole: 'Secondary'
+  }
+}]
+
+// TODO: Setup for secondary redis cache
 resource redis_lock 'Microsoft.Authorization/locks@2020-05-01' = if (!empty(lock ?? {}) && lock.?kind != 'None') {
   name: lock.?name ?? 'lock-${name}'
   properties: {
@@ -223,6 +269,7 @@ resource redis_lock 'Microsoft.Authorization/locks@2020-05-01' = if (!empty(lock
   scope: redis
 }
 
+// TODO: Setup for secondary redis cache
 resource redis_diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!empty(diagnosticStorageAccountId) || !empty(diagnosticWorkspaceId) || !empty(diagnosticEventHubAuthorizationRuleId) || !empty(diagnosticEventHubName)) {
   name: !empty(diagnosticSettingsName) ? diagnosticSettingsName : '${name}-diagnosticSettings'
   properties: {
@@ -236,6 +283,7 @@ resource redis_diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05
   scope: redis
 }
 
+// TODO: Setup for secondary redis cache
 resource redis_roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (roleAssignment, index) in (roleAssignments ?? []): {
   name: guid(redis.id, roleAssignment.principalId, roleAssignment.roleDefinitionIdOrName)
   properties: {
@@ -250,6 +298,7 @@ resource redis_roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-
   scope: redis
 }]
 
+// TODO: Setup for secondary redis cache
 module redis_privateEndpoints '../../network/private-endpoint/main.bicep' = [for (privateEndpoint, index) in (privateEndpoints ?? []): {
   name: '${uniqueString(deployment().name, location)}-redis-PrivateEndpoint-${index}'
   params: {
@@ -328,6 +377,37 @@ type roleAssignmentType = {
 
   @description('Optional. The Resource Id of the delegated managed identity resource.')
   delegatedManagedIdentityResourceId: string?
+}[]?
+
+type secondaryRedisCacheType = {
+  @description('Required. The name of the Redis cache resource.')
+  name: string?
+
+  @description('Required. The location of the Redis cache to which to geo-replicate.')
+  location: string?
+
+  @description('Optional. Enables system assigned managed identity on the resource.')
+  systemAssignedIdentity: bool?
+
+  @description('Optional. The ID(s) to assign to the resource.')
+  userAssignedIdentities: object?
+
+  @description('Optional. Static IP address. Optionally, may be specified when deploying a Redis cache inside an existing Azure Virtual Network; auto assigned by default.')
+  staticIP: string?
+
+  @description('Optional. The full resource ID of a subnet in a virtual network to deploy the Redis cache in. Example format: /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/Microsoft.{Network|ClassicNetwork}/VirtualNetworks/vnet1/subnets/subnet1.')
+  subnetId: string?
+
+  // TODO: Not sure if this makes sense for a geo-replicated instance.
+  @description('Optional. When true, replicas will be provisioned in availability zones specified in the zones parameter.')
+  zoneRedundant: bool?
+
+  // TODO: Not sure if this makes sense for a geo-replicated instance.
+  @description('Optional. If the zoneRedundant parameter is true, replicas will be provisioned in the availability zones specified here. Otherwise, the service will choose where replicas are deployed.')
+  zones: string[]?
+
+  @description('Optional. Configuration details for private endpoints. For security reasons, it is recommended to use private endpoints whenever possible.')
+  privateEndpoints: privateEndpointType
 }[]?
 
 type privateEndpointType = {
